@@ -1,7 +1,7 @@
 {
   "name": "quickscreen",
   "version": "0.1.1",
-  "description": "CLI tool to arrange windows into predefined layouts and record the screen with optional microphone audio on macOS",
+  "description": "CLI tool to arrange windows into predefined layouts and record the screen with optional microphone audio — supports macOS and Windows",
   "type": "module",
   "main": "./dist/cli.js",
   "types": "./dist/cli.d.ts",
@@ -29,7 +29,7 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc && chmod +x dist/cli.js",
+    "build": "tsc && node -e \"try{require('fs').chmodSync('dist/cli.js',0o755)}catch(_){}\"",
     "dev": "bun src/cli.ts",
     "prepublishOnly": "bun run build"
   },
@@ -37,8 +37,10 @@
     "screen-recording",
     "ffmpeg",
     "macos",
+    "windows",
     "window-layout",
     "avfoundation",
+    "gdigrab",
     "cli"
   ],
   "dependencies": {
