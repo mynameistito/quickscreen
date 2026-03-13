@@ -47,7 +47,7 @@ export const defaultLayouts: Layout[] = [
     audio: true,
     windows: [
       { app: 'Google Chrome', position: 'left' },
-      { app: 'Alacritty', position: 'right' },
+      { app: process.platform === 'win32' ? 'Windows Terminal' : 'Alacritty', position: 'right' },
     ],
     padding: { edge: 0.035, gap: 0.023, top: 0.083, bottom: 0.083 },
     recording: { area: 'windows', aspectRatio: 16 / 9 },
@@ -56,7 +56,7 @@ export const defaultLayouts: Layout[] = [
     name: 'center',
     screen: 1,
     audio: true,
-    windows: [{ app: 'Alacritty', position: 'center' }],
+    windows: [{ app: process.platform === 'win32' ? 'Windows Terminal' : 'Alacritty', position: 'center' }],
     padding: { edge: 0.10, gap: 0, top: 0.10, bottom: 0.10 },
     recording: { area: 'fullscreen' },
   },

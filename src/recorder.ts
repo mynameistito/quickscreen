@@ -4,11 +4,11 @@ import { join } from 'path'
 import type { ScreenInfo, Rect } from './windows.js'
 
 export interface RecordingOptions {
-  /** AVFoundation screen name, e.g. "Capture screen 0" */
-  screenName: string
-  /** Screen geometry for calculating crop offsets */
+  /** Screen index (used on macOS for AVFoundation device selection) */
+  screenIndex: number
+  /** Screen geometry for calculating capture region */
   screenFrame: Rect
-  /** Optional crop region (absolute coordinates). If omitted, records full screen. */
+  /** Optional crop region (absolute virtual-desktop coordinates). If omitted, records full screen. */
   crop?: Rect
   /** Record audio from default system input device */
   audio: boolean
@@ -21,9 +21,8 @@ export interface RecordingOptions {
 }
 
 /**
- * Get the AVFoundation screen device name for a given screen index.
+ * Get the AVFoundation screen device name for a given screen index (macOS only).
  * AVFoundation lists capture screens as "Capture screen 0", "Capture screen 1", etc.
- * The ordering matches the NSScreen ordering.
  */
 export function getScreenName(screenIndex: number): string {
   return `Capture screen ${screenIndex}`
@@ -31,6 +30,7 @@ export function getScreenName(screenIndex: number): string {
 
 /**
  * Generate a timestamped output file path.
+ * Uses .mp4 on Windows, .mov on macOS (both use H.264/AAC internally).
  */
 export function generateOutputPath(outputDir?: string): string {
   const dir = outputDir || join(homedir(), 'Desktop')
@@ -39,7 +39,8 @@ export function generateOutputPath(outputDir?: string): string {
     .replace(/T/, '-')
     .replace(/:/g, '')
     .replace(/\..+/, '')
-  return join(dir, `recording-${timestamp}.mov`)
+  const ext = process.platform === 'win32' ? 'mp4' : 'mov'
+  return join(dir, `recording-${timestamp}.${ext}`)
 }
 
 /**
@@ -51,39 +52,26 @@ function ensureEven(n: number): number {
 }
 
 /**
- * Start an ffmpeg recording as a child process.
- * Returns the process handle — send 'q' to its stdin to stop gracefully.
+ * Build ffmpeg arguments for macOS (AVFoundation).
  */
-export function startRecording(opts: RecordingOptions): ChildProcess {
-  const crf = opts.crf ?? 18
-  const framerate = opts.framerate ?? 30
+function buildMacArgs(opts: RecordingOptions, crf: number, framerate: number): string[] {
+  const screenName = getScreenName(opts.screenIndex)
+  const audioDevice = opts.audio ? 'default' : 'none'
 
   const args: string[] = [
-    // Input: screen + audio
     '-f', 'avfoundation',
     '-framerate', String(framerate),
+    '-i', `${screenName}:${audioDevice}`,
   ]
-
-  // Input device: "screen:audio" or "screen:none"
-  const audioDevice = opts.audio ? 'default' : 'none'
-  args.push('-i', `${opts.screenName}:${audioDevice}`)
-
-  // Video filters
-  const vf: string[] = []
 
   if (opts.crop) {
     const cropX = Math.floor(opts.crop.x - opts.screenFrame.x)
     const cropY = Math.floor(opts.crop.y - opts.screenFrame.y)
     const cropW = ensureEven(opts.crop.w)
     const cropH = ensureEven(opts.crop.h)
-    vf.push(`crop=${cropW}:${cropH}:${cropX}:${cropY}`)
+    args.push('-vf', `crop=${cropW}:${cropH}:${cropX}:${cropY}`)
   }
 
-  if (vf.length > 0) {
-    args.push('-vf', vf.join(','))
-  }
-
-  // Video codec
   args.push(
     '-c:v', 'libx264',
     '-preset', 'ultrafast',
@@ -91,14 +79,108 @@ export function startRecording(opts: RecordingOptions): ChildProcess {
     '-pix_fmt', 'yuv420p',
   )
 
-  // Audio codec — force 44100 Hz output sample rate to avoid crackling
-  // caused by sample rate mismatch between capture device and encoder
+  if (opts.audio) {
+    // Force 44100 Hz to avoid crackling from sample-rate mismatch
+    args.push('-c:a', 'aac', '-b:a', '128k', '-ar', '44100')
+  }
+
+  args.push('-movflags', '+faststart', opts.outputPath)
+  return args
+}
+
+/**
+ * Detect the first available DirectShow audio capture device on Windows.
+ * Returns the friendly name (e.g. "Microphone (Realtek Audio)") or null if none found.
+ */
+function getWindowsDshowAudioDevice(): Promise<string | null> {
+  return new Promise((resolve) => {
+    const proc = spawn('ffmpeg', ['-list_devices', 'true', '-f', 'dshow', '-i', 'dummy'], {
+      stdio: ['ignore', 'ignore', 'pipe'],
+    })
+    let stderr = ''
+    proc.stderr!.on('data', (d: Buffer) => (stderr += d.toString()))
+    proc.on('close', () => {
+      let inAudioSection = false
+      for (const line of stderr.split('\n')) {
+        if (line.includes('DirectShow audio devices')) {
+          inAudioSection = true
+          continue
+        }
+        if (inAudioSection) {
+          // Device lines look like:  "Microphone (Realtek Audio)"
+          // Alternative name lines are skipped
+          if (line.includes('Alternative name')) continue
+          const match = line.match(/"([^"]+)"/)
+          if (match) {
+            resolve(match[1])
+            return
+          }
+        }
+      }
+      resolve(null)
+    })
+  })
+}
+
+/**
+ * Build ffmpeg arguments for Windows (gdigrab video + dshow audio).
+ *
+ * gdigrab captures in virtual-desktop coordinates (top-left origin, primary at 0,0).
+ * We capture only the needed region directly via -offset_x/-offset_y/-video_size
+ * to avoid capturing the entire virtual desktop.
+ */
+async function buildWindowsArgs(opts: RecordingOptions, crf: number, framerate: number): Promise<string[]> {
+  const region = opts.crop ?? opts.screenFrame
+  const captureX = ensureEven(Math.floor(region.x))
+  const captureY = ensureEven(Math.floor(region.y))
+  const captureW = ensureEven(region.w)
+  const captureH = ensureEven(region.h)
+
+  const args: string[] = [
+    '-f', 'gdigrab',
+    '-framerate', String(framerate),
+    '-offset_x', String(captureX),
+    '-offset_y', String(captureY),
+    '-video_size', `${captureW}x${captureH}`,
+    '-i', 'desktop',
+  ]
+
+  if (opts.audio) {
+    const device = await getWindowsDshowAudioDevice()
+    if (device) {
+      args.push('-f', 'dshow', '-i', `audio=${device}`)
+    } else {
+      console.warn('No audio input device found — recording without audio')
+    }
+  }
+
+  args.push(
+    '-c:v', 'libx264',
+    '-preset', 'ultrafast',
+    '-crf', String(crf),
+    '-pix_fmt', 'yuv420p',
+  )
+
   if (opts.audio) {
     args.push('-c:a', 'aac', '-b:a', '128k', '-ar', '44100')
   }
 
-  // Output
   args.push('-movflags', '+faststart', opts.outputPath)
+  return args
+}
+
+/**
+ * Start an ffmpeg recording as a child process.
+ * Returns the process handle — send 'q' to its stdin to stop gracefully.
+ */
+export async function startRecording(opts: RecordingOptions): Promise<ChildProcess> {
+  const crf = opts.crf ?? 18
+  const framerate = opts.framerate ?? 30
+
+  const args =
+    process.platform === 'win32'
+      ? await buildWindowsArgs(opts, crf, framerate)
+      : buildMacArgs(opts, crf, framerate)
 
   const proc = spawn('ffmpeg', args, {
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -114,7 +196,6 @@ export function startRecording(opts: RecordingOptions): ChildProcess {
 export function stopRecording(proc: ChildProcess): Promise<void> {
   return new Promise((resolve, reject) => {
     if (proc.exitCode !== null) {
-      // Already exited
       resolve()
       return
     }
@@ -122,16 +203,22 @@ export function stopRecording(proc: ChildProcess): Promise<void> {
     proc.on('close', () => resolve())
     proc.on('error', reject)
 
-    // Send 'q' to stdin — ffmpeg's graceful shutdown
+    // Send 'q' to stdin — ffmpeg's graceful shutdown signal
     proc.stdin?.write('q')
   })
 }
 
 /**
- * Reveal a file in Finder.
+ * Reveal a recorded file in the system file manager.
+ * Uses Finder on macOS, Explorer on Windows.
  */
 export function revealInFinder(filePath: string): void {
-  spawn('open', ['-R', filePath], { stdio: 'ignore', detached: true }).unref()
+  if (process.platform === 'win32') {
+    // explorer /select,"path" highlights the file in Explorer
+    spawn('explorer', [`/select,${filePath}`], { stdio: 'ignore', detached: true }).unref()
+  } else {
+    spawn('open', ['-R', filePath], { stdio: 'ignore', detached: true }).unref()
+  }
 }
 
 /**
@@ -169,14 +256,14 @@ export function calculateLayoutGeometry(
   const usableW = totalW - 2 * edgePx
   const usableH = totalH - topPx - bottomPx
 
-  // Center the constrained area on the screen
+  // Centre the constrained area on the screen
   const offsetX = screenX + (screenW - totalW) / 2
   const offsetY = screenY + (screenH - totalH) / 2
 
   const windowFrames: Rect[] = []
 
   if (windowCount === 1) {
-    // Center: single window with padding
+    // Centre: single window with padding
     windowFrames.push({
       x: offsetX + edgePx,
       y: offsetY + topPx,

@@ -3,7 +3,6 @@ import { goke } from 'goke'
 import { z } from 'zod'
 import { defaultLayouts } from './layouts.js'
 import {
-  getScreenName,
   generateOutputPath,
   startRecording,
   stopRecording,
@@ -123,14 +122,13 @@ If no layout is specified, lists available layouts.`)
 
     // Start recording
     const outputPath = generateOutputPath(options.output)
-    const screenName = getScreenName(screen.index)
 
     console.log(`Recording to: ${outputPath}`)
     console.log(`Audio: ${audio ? 'on (default mic)' : 'off'}`)
     console.log(`Press Ctrl+C to stop recording\n`)
 
-    const ffmpeg = startRecording({
-      screenName,
+    const ffmpeg = await startRecording({
+      screenIndex: screen.index,
       screenFrame: screen,
       crop: recordingRect,
       audio,
