@@ -143,30 +143,39 @@ public struct PROPVARIANT {
 
 $enumerator = [MMDeviceEnumerator]::new()
 $enum = [IMMDeviceEnumerator]$enumerator
-$device = [IntPtr]::Zero
-$enum.GetDefaultAudioEndpoint(1, 0, [ref]$device) | Out-Null
-$mmDevice = [IMMDevice]::new($device)
-$name = [string]::Empty
-$mmDevice.GetId([ref]$name) | Out-Null
+$devicePtr = [IntPtr]::Zero
+try {
+    $enum.GetDefaultAudioEndpoint(1, 0, [ref]$devicePtr) | Out-Null
+    $mmDevice = [System.Runtime.InteropServices.Marshal]::GetObjectForIUnknown($devicePtr) -as [IMMDevice]
+    $name = [string]::Empty
+    $mmDevice.GetId([ref]$name) | Out-Null
 
-$store = [IntPtr]::Zero
-$mmDevice.OpenPropertyStore(0, [ref]$store) | Out-Null
-$props = [IPropertyStore]::new($store)
-$count = 0
-$props.GetCount([ref]$count) | Out-Null
+    $storePtr = [IntPtr]::Zero
+    try {
+        $mmDevice.OpenPropertyStore(0, [ref]$storePtr) | Out-Null
+        $props = [System.Runtime.InteropServices.Marshal]::GetObjectForIUnknown($storePtr) -as [IPropertyStore]
+        $count = 0
+        $props.GetCount([ref]$count) | Out-Null
 
-$friendlyNameKey = [PROPERTYKEY]::new()
-$friendlyNameKey.fmtid = [Guid]"a45c254e-df1c-4efd-8020-67d146a850e0"
-$friendlyNameKey.pid = 14
+        $friendlyNameKey = [PROPERTYKEY]::new()
+        $friendlyNameKey.fmtid = [Guid]"a45c254e-df1c-4efd-8020-67d146a850e0"
+        $friendlyNameKey.pid = 14
 
-$value = [PROPVARIANT]::new()
-$props.GetValue([ref]$friendlyNameKey, [ref]$value) | Out-Null
-[System.Runtime.InteropServices.Marshal]::PtrToStringUni($value.pwszVal)
+        $value = [PROPVARIANT]::new()
+        $props.GetValue([ref]$friendlyNameKey, [ref]$value) | Out-Null
+        [System.Runtime.InteropServices.Marshal]::PtrToStringUni($value.pwszVal)
+    } finally {
+        if ($storePtr -ne [IntPtr]::Zero) { [System.Runtime.InteropServices.Marshal]::Release($storePtr) | Out-Null }
+    }
+} finally {
+    if ($devicePtr -ne [IntPtr]::Zero) { [System.Runtime.InteropServices.Marshal]::Release($devicePtr) | Out-Null }
+}
 `
-    const result = execSync(`powershell -NoProfile -NonInteractive -Command "${ps.replace(/"/g, '\\"').replace(/\n/g, ' ')}"`, {
-      encoding: 'utf8',
-      timeout: 5000,
-    })
+    const encoded = Buffer.from(ps, 'utf16le').toString('base64')
+    const result = execSync(
+      `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encoded}`,
+      { encoding: 'utf8', timeout: 5000 },
+    )
     const name = result.trim()
     return name.length > 0 ? name : null
   } catch {
@@ -186,7 +195,7 @@ function parseDshowAudioDevices(stderr: string): string[] {
       inAudioSection = true
       continue
     }
-    if (line.includes('DirectShow video devices')) {
+    if (inAudioSection && line.includes('DirectShow')) {
       break
     }
     if (inAudioSection) {
@@ -281,10 +290,12 @@ async function buildWindowsArgs(opts: RecordingOptions, crf: number, framerate: 
     '-i', 'desktop',
   ]
 
+  let hasAudioInput = false
   if (opts.audio) {
     const device = await getWindowsDshowAudioDevice()
     if (device) {
       args.push('-f', 'dshow', '-i', `audio=${device}`)
+      hasAudioInput = true
     } else {
       console.warn('No audio input device found — recording without audio')
     }
@@ -297,7 +308,7 @@ async function buildWindowsArgs(opts: RecordingOptions, crf: number, framerate: 
     '-pix_fmt', 'yuv420p',
   )
 
-  if (opts.audio) {
+  if (hasAudioInput) {
     args.push('-c:a', 'aac', '-b:a', '128k', '-ar', '44100')
   }
 
@@ -350,8 +361,8 @@ export function stopRecording(proc: ChildProcess): Promise<void> {
  */
 export function revealInFinder(filePath: string): void {
   if (process.platform === 'win32') {
-    // explorer /select,"path" highlights the file in Explorer
-    spawn('explorer', [`/select,${filePath}`], { stdio: 'ignore', detached: true }).unref()
+    const escaped = filePath.replace(/"/g, '""')
+    spawn('explorer', [`/select,"${escaped}"`], { stdio: 'ignore', detached: true }).unref()
   } else {
     spawn('open', ['-R', filePath], { stdio: 'ignore', detached: true }).unref()
   }
@@ -431,7 +442,7 @@ export function calculateLayoutGeometry(
     const layoutW = rightmost - leftmost
     const layoutCenterX = leftmost + layoutW / 2
     const recW = ensureEven(layoutW + 2 * edgePx)
-    const recX = layoutCenterX - recW / 2
+    const recX = Math.floor(layoutCenterX - recW / 2)
 
     recordingRect = {
       x: recX,

@@ -178,6 +178,10 @@ if ($proc) {
  * Launch an application. If already running, activates it instead.
  */
 export async function launchApp(appName: string): Promise<void> {
+  if (await isAppRunning(appName)) {
+    await activateApp(appName)
+    return
+  }
   const launchName = escapePowerShellString(toLaunchName(appName))
   const script = `Start-Process '${launchName}'`
   await runPowerShell(script)
@@ -190,7 +194,7 @@ export async function isAppRunning(appName: string): Promise<boolean> {
   const processName = escapePowerShellString(toProcessName(appName))
   const script = `
 $proc = Get-Process -Name '${processName}' -ErrorAction SilentlyContinue |
-    Where-Object { \$_.MainWindowHandle -ne [IntPtr]::Zero } |
+    Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero } |
     Select-Object -First 1
 if ($null -ne $proc) { Write-Output 'true' } else { Write-Output 'false' }
 `

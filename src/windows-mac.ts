@@ -16,7 +16,7 @@ function escapeJXAString(str: string): string {
 
 /**
  * Run an osascript command (AppleScript or JXA) and return stdout.
- * Rejects on non-zero exit or stderr.
+ * Rejects on non-zero exit. Stderr is captured but only used in the error message.
  */
 function osascript(script: string, lang: 'AppleScript' | 'JavaScript' = 'AppleScript'): Promise<string> {
   return new Promise((resolve, reject) => {
