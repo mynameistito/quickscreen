@@ -29,6 +29,14 @@ function toLaunchName(appName: string): string {
 }
 
 /**
+ * Escape a string for safe interpolation in PowerShell single-quoted strings.
+ * Doubling single quotes is the PowerShell-safe escape mechanism.
+ */
+function escapePowerShellString(str: string): string {
+  return str.replace(/'/g, "''")
+}
+
+/**
  * Run a PowerShell script encoded as Base64 UTF-16LE to avoid escaping issues.
  * Returns stdout as a trimmed string. Rejects on non-zero exit.
  */
@@ -45,9 +53,18 @@ function runPowerShell(script: string): Promise<string> {
     )
     let stdout = ''
     let stderr = ''
+    let settled = false
     proc.stdout!.on('data', (d: Buffer) => (stdout += d.toString()))
     proc.stderr!.on('data', (d: Buffer) => (stderr += d.toString()))
+    proc.on('error', (err) => {
+      if (!settled) {
+        settled = true
+        reject(err)
+      }
+    })
     proc.on('close', (code) => {
+      if (settled) return
+      settled = true
       if (code !== 0) {
         // Strip CLIXML envelope (e.g. "#< CLIXML\n<Objs ...>") — extract plain text from <S> tags
         let msg = stderr.trim()
@@ -101,7 +118,7 @@ Write-Output (ConvertTo-Json -InputObject $result -Compress)
  * Restores the window first if it is minimised or maximised.
  */
 export async function setWindowFrame(appName: string, frame: Rect): Promise<void> {
-  const processName = toProcessName(appName)
+  const processName = escapePowerShellString(toProcessName(appName))
   const x = Math.round(frame.x)
   const y = Math.round(frame.y)
   const w = Math.round(frame.w)
@@ -135,7 +152,7 @@ $hwnd = $proc.MainWindowHandle
  * Bring an application window to the foreground.
  */
 export async function activateApp(appName: string): Promise<void> {
-  const processName = toProcessName(appName)
+  const processName = escapePowerShellString(toProcessName(appName))
   const script = `
 Add-Type @"
 using System.Runtime.InteropServices;
@@ -161,7 +178,7 @@ if ($proc) {
  * Launch an application. If already running, activates it instead.
  */
 export async function launchApp(appName: string): Promise<void> {
-  const launchName = toLaunchName(appName)
+  const launchName = escapePowerShellString(toLaunchName(appName))
   const script = `Start-Process '${launchName}'`
   await runPowerShell(script)
 }
@@ -170,9 +187,11 @@ export async function launchApp(appName: string): Promise<void> {
  * Check if an application is currently running.
  */
 export async function isAppRunning(appName: string): Promise<boolean> {
-  const processName = toProcessName(appName)
+  const processName = escapePowerShellString(toProcessName(appName))
   const script = `
-$proc = Get-Process -Name '${processName}' -ErrorAction SilentlyContinue
+$proc = Get-Process -Name '${processName}' -ErrorAction SilentlyContinue |
+    Where-Object { \$_.MainWindowHandle -ne [IntPtr]::Zero } |
+    Select-Object -First 1
 if ($null -ne $proc) { Write-Output 'true' } else { Write-Output 'false' }
 `
   const output = await runPowerShell(script)

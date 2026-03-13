@@ -1,5 +1,5 @@
 export interface WindowSlot {
-  /** Application name as it appears in macOS (e.g. "Google Chrome", "Alacritty") */
+  /** Application name as it appears on the host OS (e.g. "Google Chrome", "Alacritty", "Windows Terminal") */
   app: string
   /** Where to place the window on screen */
   position: 'left' | 'right' | 'center'

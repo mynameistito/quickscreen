@@ -89,7 +89,143 @@ function buildMacArgs(opts: RecordingOptions, crf: number, framerate: number): s
 }
 
 /**
- * Detect the first available DirectShow audio capture device on Windows.
+ * Get the Windows default audio input (recording) device name using Core Audio API.
+ * Returns the friendly name or null if unable to determine.
+ */
+function getWindowsDefaultAudioInputDevice(): string | null {
+  try {
+    const ps = `
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.ComTypes;
+
+[ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
+internal class MMDeviceEnumerator { }
+
+[Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface IMMDeviceEnumerator {
+int EnumAudioEndpoints(int dataFlow, int stateMask, out IntPtr devices);
+int GetDefaultAudioEndpoint(int dataFlow, int role, out IntPtr device);
+int RegisterEndpointNotificationCallback(IntPtr client);
+int UnregisterEndpointNotificationCallback(IntPtr client);
+}
+
+[Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface IMMDevice {
+int Activate(ref Guid iid, int dwClsCtx, IntPtr activationParams, out IntPtr interfacePtr);
+int OpenPropertyStore(int stgmAccess, out IntPtr properties);
+int GetId(out string id);
+int GetState(out int state);
+}
+
+[Guid("71977F22-3D83-4618-BC85-CB2B9FCD572B"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface IPropertyStore {
+int GetCount(out int count);
+int GetAt(int index, out PROPERTYKEY key);
+int GetValue(ref PROPERTYKEY key, out PROPVARIANT value);
+int SetValue(ref PROPERTYKEY key, ref PROPVARIANT value);
+int Commit();
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public struct PROPERTYKEY {
+public Guid fmtid;
+public int pid;
+}
+
+[StructLayout(LayoutKind.Explicit)]
+public struct PROPVARIANT {
+[FieldOffset(0)] public int vt;
+[FieldOffset(8)] public IntPtr pwszVal;
+}
+'@
+
+$enumerator = [MMDeviceEnumerator]::new()
+$enum = [IMMDeviceEnumerator]$enumerator
+$device = [IntPtr]::Zero
+$enum.GetDefaultAudioEndpoint(1, 0, [ref]$device) | Out-Null
+$mmDevice = [IMMDevice]::new($device)
+$name = [string]::Empty
+$mmDevice.GetId([ref]$name) | Out-Null
+
+$store = [IntPtr]::Zero
+$mmDevice.OpenPropertyStore(0, [ref]$store) | Out-Null
+$props = [IPropertyStore]::new($store)
+$count = 0
+$props.GetCount([ref]$count) | Out-Null
+
+$friendlyNameKey = [PROPERTYKEY]::new()
+$friendlyNameKey.fmtid = [Guid]"a45c254e-df1c-4efd-8020-67d146a850e0"
+$friendlyNameKey.pid = 14
+
+$value = [PROPVARIANT]::new()
+$props.GetValue([ref]$friendlyNameKey, [ref]$value) | Out-Null
+[System.Runtime.InteropServices.Marshal]::PtrToStringUni($value.pwszVal)
+`
+    const result = execSync(`powershell -NoProfile -NonInteractive -Command "${ps.replace(/"/g, '\\"').replace(/\n/g, ' ')}"`, {
+      encoding: 'utf8',
+      timeout: 5000,
+    })
+    const name = result.trim()
+    return name.length > 0 ? name : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Parse DirectShow device list from ffmpeg stderr output.
+ * Returns an array of audio device names.
+ */
+function parseDshowAudioDevices(stderr: string): string[] {
+  const devices: string[] = []
+  let inAudioSection = false
+  for (const line of stderr.split('\n')) {
+    if (line.includes('DirectShow audio devices')) {
+      inAudioSection = true
+      continue
+    }
+    if (line.includes('DirectShow video devices')) {
+      break
+    }
+    if (inAudioSection) {
+      if (line.includes('Alternative name')) continue
+      const match = line.match(/"([^"]+)"/)
+      if (match) {
+        devices.push(match[1])
+      }
+    }
+  }
+  return devices
+}
+
+/**
+ * Find the best matching DirectShow audio device for a given friendly name.
+ * DirectShow device names may include suffixes like " (Realtek Audio)" that aren't
+ * in the Core Audio friendly name, so we do prefix matching.
+ */
+function findBestMatch(targetName: string, devices: string[]): string | null {
+  const targetLower = targetName.toLowerCase()
+  
+  // Try exact match first
+  const exactMatch = devices.find(d => d.toLowerCase() === targetLower)
+  if (exactMatch) return exactMatch
+
+  // Try finding device that starts with the target name (handles suffixes)
+  const prefixMatch = devices.find(d => d.toLowerCase().startsWith(targetLower))
+  if (prefixMatch) return prefixMatch
+
+  // Try finding if target name appears anywhere in device name
+  const containsMatch = devices.find(d => d.toLowerCase().includes(targetLower))
+  if (containsMatch) return containsMatch
+
+  return null
+}
+
+/**
+ * Detect the default DirectShow audio capture device on Windows.
+ * Prefers the Windows default input device if determinable, falls back to first available.
  * Returns the friendly name (e.g. "Microphone (Realtek Audio)") or null if none found.
  */
 function getWindowsDshowAudioDevice(): Promise<string | null> {
@@ -100,24 +236,24 @@ function getWindowsDshowAudioDevice(): Promise<string | null> {
     let stderr = ''
     proc.stderr!.on('data', (d: Buffer) => (stderr += d.toString()))
     proc.on('close', () => {
-      let inAudioSection = false
-      for (const line of stderr.split('\n')) {
-        if (line.includes('DirectShow audio devices')) {
-          inAudioSection = true
-          continue
-        }
-        if (inAudioSection) {
-          // Device lines look like:  "Microphone (Realtek Audio)"
-          // Alternative name lines are skipped
-          if (line.includes('Alternative name')) continue
-          const match = line.match(/"([^"]+)"/)
-          if (match) {
-            resolve(match[1])
-            return
-          }
+      const devices = parseDshowAudioDevices(stderr)
+      if (devices.length === 0) {
+        resolve(null)
+        return
+      }
+
+      // Try to get Windows default audio input device
+      const defaultDevice = getWindowsDefaultAudioInputDevice()
+      if (defaultDevice) {
+        const match = findBestMatch(defaultDevice, devices)
+        if (match) {
+          resolve(match)
+          return
         }
       }
-      resolve(null)
+
+      // Fall back to first available device
+      resolve(devices[0])
     })
   })
 }
@@ -131,8 +267,8 @@ function getWindowsDshowAudioDevice(): Promise<string | null> {
  */
 async function buildWindowsArgs(opts: RecordingOptions, crf: number, framerate: number): Promise<string[]> {
   const region = opts.crop ?? opts.screenFrame
-  const captureX = ensureEven(Math.floor(region.x))
-  const captureY = ensureEven(Math.floor(region.y))
+  const captureX = Math.floor(region.x)
+  const captureY = Math.floor(region.y)
   const captureW = ensureEven(region.w)
   const captureH = ensureEven(region.h)
 

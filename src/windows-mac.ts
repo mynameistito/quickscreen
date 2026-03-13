@@ -4,6 +4,17 @@ import type { Rect, ScreenInfo } from './types.js'
 export type { Rect, ScreenInfo }
 
 /**
+ * Escape a string for safe interpolation inAppleScript/JXA strings.
+ * Escapes backslashes, double quotes, and newlines.
+ */
+function escapeJXAString(str: string): string {
+  return str
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, '\\n')
+}
+
+/**
  * Run an osascript command (AppleScript or JXA) and return stdout.
  * Rejects on non-zero exit or stderr.
  */
@@ -13,11 +24,21 @@ function osascript(script: string, lang: 'AppleScript' | 'JavaScript' = 'AppleSc
     const proc = spawn('osascript', args, { stdio: ['ignore', 'pipe', 'pipe'] })
     let stdout = ''
     let stderr = ''
+    let settled = false
     proc.stdout.on('data', (d) => (stdout += d))
     proc.stderr.on('data', (d) => (stderr += d))
+    proc.on('error', (err) => {
+      if (!settled) {
+        settled = true
+        reject(err)
+      }
+    })
     proc.on('close', (code) => {
-      if (code !== 0) reject(new Error(`osascript exited ${code}: ${stderr.trim()}`))
-      else resolve(stdout.trim())
+      if (!settled) {
+        settled = true
+        if (code !== 0) reject(new Error(`osascript exited ${code}: ${stderr.trim()}`))
+        else resolve(stdout.trim())
+      }
     })
   })
 }
@@ -65,18 +86,19 @@ export async function getScreens(): Promise<ScreenInfo[]> {
  * that resist frame changes.
  */
 export async function setWindowFrame(appName: string, frame: Rect): Promise<void> {
+  const escaped = escapeJXAString(appName)
   // First try the JXA approach with AXEnhancedUserInterface workaround
   // This is needed for Alacritty and similar apps
   const jxa = `
     ObjC.import('AppKit');
     ObjC.import('ApplicationServices');
 
-    const app = Application("${appName}");
+    const app = Application("${escaped}");
     app.includeStandardAdditions = true;
 
     // Get the process
     const sysEvents = Application("System Events");
-    const proc = sysEvents.processes.whose({name: {_contains: "${appName}"}})[0];
+    const proc = sysEvents.processes.whose({name: "${escaped}"})[0];
 
     if (proc) {
       try {
@@ -112,15 +134,17 @@ export async function setWindowFrame(appName: string, frame: Rect): Promise<void
  * Activate (bring to front) an application.
  */
 export async function activateApp(appName: string): Promise<void> {
-  await osascript(`tell application "${appName}" to activate`)
+  const escaped = escapeJXAString(appName)
+  await osascript(`tell application "${escaped}" to activate`)
 }
 
 /**
  * Launch an application if not running, or activate it if already running.
  */
 export async function launchApp(appName: string): Promise<void> {
+  const escaped = escapeJXAString(appName)
   await osascript(`
-    tell application "${appName}"
+    tell application "${escaped}"
       activate
     end tell
   `)
@@ -130,9 +154,10 @@ export async function launchApp(appName: string): Promise<void> {
  * Check if an application is currently running.
  */
 export async function isAppRunning(appName: string): Promise<boolean> {
+  const escaped = escapeJXAString(appName)
   const result = await osascript(`
     tell application "System Events"
-      set appRunning to (name of every process) contains "${appName}"
+      set appRunning to (name of every process) contains "${escaped}"
     end tell
     return appRunning
   `)
@@ -143,5 +168,6 @@ export async function isAppRunning(appName: string): Promise<boolean> {
  * Show a macOS notification.
  */
 export async function showNotification(message: string): Promise<void> {
-  await osascript(`display notification "${message}" with title "quickscreen"`)
+  const escaped = escapeJXAString(message)
+  await osascript(`display notification "${escaped}" with title "quickscreen"`)
 }
