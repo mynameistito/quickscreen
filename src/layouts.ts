@@ -1,5 +1,7 @@
+const terminalApp = process.platform === 'win32' ? 'Windows Terminal' : 'Alacritty'
+
 export interface WindowSlot {
-  /** Application name as it appears in macOS (e.g. "Google Chrome", "Alacritty") */
+  /** Application name as it appears on the host OS (e.g. "Google Chrome", "Alacritty", "Windows Terminal") */
   app: string
   /** Where to place the window on screen */
   position: 'left' | 'right' | 'center'
@@ -47,7 +49,7 @@ export const defaultLayouts: Layout[] = [
     audio: true,
     windows: [
       { app: 'Google Chrome', position: 'left' },
-      { app: 'Alacritty', position: 'right' },
+      { app: terminalApp, position: 'right' },
     ],
     padding: { edge: 0.035, gap: 0.023, top: 0.083, bottom: 0.083 },
     recording: { area: 'windows', aspectRatio: 16 / 9 },
@@ -56,7 +58,7 @@ export const defaultLayouts: Layout[] = [
     name: 'center',
     screen: 1,
     audio: true,
-    windows: [{ app: 'Alacritty', position: 'center' }],
+    windows: [{ app: terminalApp, position: 'center' }],
     padding: { edge: 0.10, gap: 0, top: 0.10, bottom: 0.10 },
     recording: { area: 'fullscreen' },
   },
